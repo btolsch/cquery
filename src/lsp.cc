@@ -33,6 +33,14 @@ struct UriCache {
     if (cache.TryGet(path, &resolved))
       return resolved;
     LOG_S(INFO) << "No cached URI for " << path;
+
+    // If we do not have the value in the cache, try to renormalize it.
+    // Otherwise we will return paths with all lower-case letters which may
+    // break vscode.
+    optional<AbsolutePath> normalized = NormalizePath(path.path, true /*ensure_exists*/, false /*force_lower_on_windows*/);
+    if (normalized)
+      return normalized->path;
+
     return path;
   }
 
@@ -291,7 +299,7 @@ std::string lsDocumentUri::GetRawPath() const {
   if (raw_uri_.compare(0, 8, "file:///"))
     return raw_uri_;
   std::string ret;
-#ifdef _WIN32
+#if defined(_WIN32)
   size_t i = 8;
 #else
   size_t i = 7;

@@ -3,6 +3,7 @@
 #include "cache_manager.h"
 #include "clang_system_include_extractor.h"
 #include "clang_utils.h"
+#include "compiler.h"
 #include "language.h"
 #include "match.h"
 #include "platform.h"
@@ -21,6 +22,7 @@
 #include <unistd.h>
 #endif
 
+#include <optional.h>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -41,6 +43,7 @@ MAKE_REFLECT_STRUCT(CompileCommandsEntry, directory, file, command, args);
 namespace {
 
 bool g_disable_normalize_path_for_test = false;
+optional<CompilerType> g_use_compiler_type_for_test = nullopt;
 
 struct NormalizationCache {
   // input path -> normalized path
@@ -146,7 +149,8 @@ const std::vector<std::string>& GetSystemIncludes(
   }
 
   std::vector<std::string> compiler_drivers = {
-      GetExecutablePathNextToCqueryBinary("cquery-clang"), "clang++", "g++"};
+      GetExecutablePathNextToCqueryBinary("cquery-clang").path, "clang++",
+      "g++"};
   if (IsAbsolutePath(compiler_driver)) {
     compiler_drivers.insert(compiler_drivers.begin(), compiler_driver);
   }
@@ -174,7 +178,8 @@ std::vector<std::string> kBlacklistMulti = {
 
 // Blacklisted flags which are always removed from the command line.
 std::vector<std::string> kBlacklist = {
-    "-c", "-MP", "-MD", "-MMD", "--fcolor-diagnostics", "-showIncludes"};
+    "-c", "-MP", "-MD", "-MMD", "--fcolor-diagnostics", "-showIncludes",
+    "/permissive", /* These are MSVC PCH flags: */ "/Fp", "/Yc", "/Yu" };
 
 // Arguments which are followed by a potentially relative path. We need to make
 // all relative paths absolute, otherwise libclang will not resolve them.
@@ -274,7 +279,7 @@ Project::Entry GetCompilationEntryFromCompileCommandEntry(
   // iterates in reverse to find the last one as soon as possible
   // in case of multiple --driver-mode flags.
   for (int i = args.size() - 1; i >= 0; --i) {
-    if (strstr(args[i].c_str(), "--dirver-mode=")) {
+    if (strstr(args[i].c_str(), "--driver-mode=")) {
       clang_cl = clang_cl || strstr(args[i].c_str(), "--driver-mode=cl");
       break;
     }
@@ -308,12 +313,20 @@ Project::Entry GetCompilationEntryFromCompileCommandEntry(
   // Compiler driver. If it looks like a path normalize it.
   std::string compiler_driver = args[i - 1];
   if (FindAnyPartial(compiler_driver, {"/", ".."}))
-    compiler_driver = cleanup_maybe_relative_path(compiler_driver);
+    compiler_driver = cleanup_maybe_relative_path(compiler_driver).path;
   result.args.push_back(compiler_driver);
 
+  CompilerType compiler_type;
+
+  if (g_use_compiler_type_for_test) {
+    compiler_type = g_use_compiler_type_for_test.value();
+  } else {
+    compiler_type = FindCompilerType(compiler_driver);
+  }
+
   // Add -working-directory if not provided.
-  if (!AnyStartsWith(args, "-working-directory"))
-    result.args.emplace_back("-working-directory=" + entry.directory);
+  if (!clang_cl && !AnyStartsWith(args, "-working-directory"))
+    result.args.push_back("-working-directory=" + entry.directory);
 
   if (!gTestOutputMode) {
     std::vector<const char*> platform = GetPlatformClangArguments();
@@ -387,7 +400,7 @@ Project::Entry GetCompilationEntryFromCompileCommandEntry(
       // slow. See
       // https://github.com/cquery-project/cquery/commit/af63df09d57d765ce12d40007bf56302a0446678.
       if (EndsWith(arg, base_name))
-        arg = cleanup_maybe_relative_path(arg);
+        arg = cleanup_maybe_relative_path(arg).path;
       // TODO Exclude .a .o to make link command in compile_commands.json work.
       // Also, clang_parseTranslationUnit2FullArgv does not seem to accept
       // multiple source filenames.
@@ -404,17 +417,19 @@ Project::Entry GetCompilationEntryFromCompileCommandEntry(
 
   // Add -resource-dir so clang can correctly resolve system includes like
   // <cstddef>
-  if (!AnyStartsWith(result.args, "-resource-dir"))
+  if (!clang_cl && !AnyStartsWith(result.args, "-resource-dir") && !config->resource_dir.empty()) {
     result.args.push_back("-resource-dir=" + config->resource_dir);
+  }
 
   // There could be a clang version mismatch between what the project uses and
-  // what cquery uses. Make sure we do not emit warnings for mismatched options.
-  if (!AnyStartsWith(result.args, "-Wno-unknown-warning-option"))
+  // what cquery uses. Make sure we do not emit warnings for mismatched
+  // options.
+  if (!clang_cl && !AnyStartsWith(result.args, "-Wno-unknown-warning-option"))
     result.args.push_back("-Wno-unknown-warning-option");
 
   // Using -fparse-all-comments enables documentation in the indexer and in
   // code completion.
-  if (g_config->index.comments > 1 &&
+  if (!clang_cl && g_config->index.comments > 1 &&
       !AnyStartsWith(result.args, "-fparse-all-comments")) {
     result.args.push_back("-fparse-all-comments");
   }
@@ -513,7 +528,7 @@ std::vector<Project::Entry> LoadCompilationEntriesFromDirectory(
     // Try to load compile_commands.json, but fallback to a project listing.
   } else {
     project->mode = ProjectMode::ExternalCommand;
-#ifdef _WIN32
+#if defined(_WIN32)
 // TODO
 #else
     char tmpdir[] = "/tmp/cquery-compdb-XXXXXX";
@@ -561,7 +576,7 @@ std::vector<Project::Entry> LoadCompilationEntriesFromDirectory(
     }
   }
   if (!g_config->compilationDatabaseCommand.empty()) {
-#ifdef _WIN32
+#if defined(_WIN32)
 // TODO
 #else
     unlink((comp_db_dir + "compile_commands.json").c_str());
@@ -787,17 +802,18 @@ void Project::Index(QueueManager* queue,
     }
     bool is_interactive =
         working_files->GetFileByFilename(entry.filename) != nullptr;
-    queue->index_request.PushBack(Index_Request(entry.filename, entry.args,
-                                                is_interactive, *content,
-                                                ICacheManager::Make(), id));
+    queue->index_request.Enqueue(Index_Request(entry.filename, entry.args,
+                                               is_interactive, *content,
+                                               ICacheManager::Make(), id), false /*priority*/);
   });
 }
 
 TEST_SUITE("Project") {
   void CheckFlags(const std::string& directory, const std::string& file,
-                  std::vector<std::string> raw,
+                  CompilerType compiler_type, std::vector<std::string> raw,
                   std::vector<std::string> expected) {
     g_disable_normalize_path_for_test = true;
+    g_use_compiler_type_for_test = compiler_type;
     gTestOutputMode = true;
 
     ProjectConfig project;
@@ -829,7 +845,7 @@ TEST_SUITE("Project") {
 
   void CheckFlags(std::vector<std::string> raw,
                   std::vector<std::string> expected) {
-    CheckFlags("/dir/", "file.cc", raw, expected);
+    CheckFlags("/dir/", "file.cc", CompilerType::Clang, raw, expected);
   }
 
   TEST_CASE("strip meta-compiler invocations") {
@@ -862,20 +878,21 @@ TEST_SUITE("Project") {
   }
 
   TEST_CASE("Windows path normalization") {
-    CheckFlags("E:/workdir", "E:/workdir/bar.cc", /* raw */ {"clang", "bar.cc"},
+    CheckFlags("E:/workdir", "E:/workdir/bar.cc", CompilerType::Clang,
+               /* raw */ {"clang", "bar.cc"},
                /* expected */
                {"clang", "-working-directory=E:/workdir", "&E:/workdir/bar.cc",
                 "-resource-dir=/w/resource_dir/", "-Wno-unknown-warning-option",
                 "-fparse-all-comments"});
 
-    CheckFlags("E:/workdir", "E:/workdir/bar.cc",
+    CheckFlags("E:/workdir", "E:/workdir/bar.cc", CompilerType::Clang,
                /* raw */ {"clang", "E:/workdir/bar.cc"},
                /* expected */
                {"clang", "-working-directory=E:/workdir", "&E:/workdir/bar.cc",
                 "-resource-dir=/w/resource_dir/", "-Wno-unknown-warning-option",
                 "-fparse-all-comments"});
 
-    CheckFlags("E:/workdir", "E:/workdir/bar.cc",
+    CheckFlags("E:/workdir", "E:/workdir/bar.cc", CompilerType::Clang,
                /* raw */ {"clang-cl.exe", "/I./test", "E:/workdir/bar.cc"},
                /* expected */
                {"clang-cl.exe", "-working-directory=E:/workdir",
@@ -883,18 +900,16 @@ TEST_SUITE("Project") {
                 "-resource-dir=/w/resource_dir/", "-Wno-unknown-warning-option",
                 "-fparse-all-comments"});
 
-    CheckFlags("E:/workdir", "E:/workdir/bar.cc",
+    CheckFlags("E:/workdir", "E:/workdir/bar.cc", CompilerType::MSVC,
                /* raw */
                {"cl.exe", "/I../third_party/test/include", "E:/workdir/bar.cc"},
                /* expected */
-               {"cl.exe", "-working-directory=E:/workdir",
-                "/I&E:/workdir/../third_party/test/include",
-                "&E:/workdir/bar.cc", "-resource-dir=/w/resource_dir/",
-                "-Wno-unknown-warning-option", "-fparse-all-comments"});
+               {"cl.exe", "/I&E:/workdir/../third_party/test/include",
+                "&E:/workdir/bar.cc"});
   }
 
   TEST_CASE("Path in args") {
-    CheckFlags("/home/user", "/home/user/foo/bar.c",
+    CheckFlags("/home/user", "/home/user/foo/bar.c", CompilerType::Clang,
                /* raw */ {"cc", "-O0", "foo/bar.c"},
                /* expected */
                {"cc", "-working-directory=/home/user", "-O0",
@@ -903,7 +918,7 @@ TEST_SUITE("Project") {
   }
 
   TEST_CASE("Implied binary") {
-    CheckFlags("/home/user", "/home/user/foo/bar.cc",
+    CheckFlags("/home/user", "/home/user/foo/bar.cc", CompilerType::Clang,
                /* raw */ {"clang", "-DDONT_IGNORE_ME"},
                /* expected */
                {"clang", "-working-directory=/home/user", "-DDONT_IGNORE_ME",
@@ -916,6 +931,7 @@ TEST_SUITE("Project") {
   TEST_CASE("ycm") {
     CheckFlags(
         "/w/c/s/out/Release", "../../ash/login/lock_screen_sanity_unittest.cc",
+        CompilerType::Clang,
 
         /* raw */
         {
@@ -1265,6 +1281,7 @@ TEST_SUITE("Project") {
   TEST_CASE("chromium") {
     CheckFlags(
         "/w/c/s/out/Release", "../../apps/app_lifetime_monitor.cc",
+        CompilerType::Clang,
         /* raw */
         {"/work/goma/gomacc",
          "../../third_party/llvm-build/Release+Asserts/bin/clang++",

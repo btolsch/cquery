@@ -268,9 +268,9 @@ void BuildDetailString(CXCompletionString completion_string,
                        bool include_snippets,
                        int& angle_stack) {
   int num_chunks = clang_getNumCompletionChunks(completion_string);
-  auto append = [&](const char* text) {
+  auto append_possible_snippet = [&](const char* text) {
     detail += text;
-    if (do_insert)
+    if (do_insert && include_snippets)
       insert += text;
   };
   for (int i = 0; i < num_chunks; ++i) {
@@ -341,46 +341,46 @@ void BuildDetailString(CXCompletionString completion_string,
       }
 
       case CXCompletionChunk_LeftParen:
-        append("(");
+        append_possible_snippet("(");
         break;
       case CXCompletionChunk_RightParen:
-        append(")");
+        append_possible_snippet(")");
         break;
       case CXCompletionChunk_LeftBracket:
-        append("[");
+        append_possible_snippet("[");
         break;
       case CXCompletionChunk_RightBracket:
-        append("]");
+        append_possible_snippet("]");
         break;
       case CXCompletionChunk_LeftBrace:
-        append("{");
+        append_possible_snippet("{");
         break;
       case CXCompletionChunk_RightBrace:
-        append("}");
+        append_possible_snippet("}");
         break;
       case CXCompletionChunk_LeftAngle:
         ++angle_stack;
-        append("<");
+        append_possible_snippet("<");
         break;
       case CXCompletionChunk_RightAngle:
         --angle_stack;
-        append(">");
+        append_possible_snippet(">");
         break;
       case CXCompletionChunk_Comma:
-        append(", ");
+        append_possible_snippet(", ");
         break;
       case CXCompletionChunk_Colon:
-        append(":");
+        append_possible_snippet(":");
         break;
       case CXCompletionChunk_SemiColon:
-        append(";");
+        append_possible_snippet(";");
         break;
       case CXCompletionChunk_Equal:
-        append("=");
+        append_possible_snippet("=");
         break;
       case CXCompletionChunk_HorizontalSpace:
       case CXCompletionChunk_VerticalSpace:
-        append(" ");
+        append_possible_snippet(" ");
         break;
     }
   }
@@ -569,10 +569,10 @@ void CompletionQueryMain(ClangCompleteManager* completion_manager) {
 
         // label/filterText/insertText
         BuildCompletionItemTexts(ls_result, result.CompletionString,
-                                 g_config->client.snippetSupport);
+                                 g_config->completion.enableSnippets);
 
         for (auto i = first_idx; i < ls_result.size(); ++i) {
-          if (g_config->client.snippetSupport &&
+          if (g_config->completion.enableSnippets &&
               ls_result[i].insertTextFormat == lsInsertTextFormat::Snippet) {
             ls_result[i].insertText += "$0";
           }
@@ -589,9 +589,9 @@ void CompletionQueryMain(ClangCompleteManager* completion_manager) {
                           ls_completion_item.insertText, do_insert,
                           ls_completion_item.insertTextFormat,
                           &ls_completion_item.parameters_,
-                          g_config->client.snippetSupport, angle_stack);
+                          g_config->completion.enableSnippets, angle_stack);
         assert(angle_stack == 0);
-        if (g_config->client.snippetSupport &&
+        if (g_config->completion.enableSnippets &&
             ls_completion_item.insertTextFormat ==
                 lsInsertTextFormat::Snippet) {
           ls_completion_item.insertText += "$0";
@@ -619,7 +619,7 @@ void DiagnosticsQueryMain(ClangCompleteManager* completion_manager) {
     // Fetching the completion request blocks until we have a request.
     std::unique_ptr<ClangCompleteManager::DiagnosticRequest> request =
         completion_manager->diagnostics_request_.Dequeue();
-    if (!request)
+    if (!request || !g_config->diagnostics.onType)
       continue;
 
     std::string path = request->path;
@@ -728,9 +728,9 @@ void ClangCompleteManager::CodeComplete(
     const lsRequestId& id,
     const lsTextDocumentPositionParams& completion_location,
     const OnComplete& on_complete) {
-  completion_request_.PushBack(std::make_unique<CompletionRequest>(
+  completion_request_.Enqueue(std::make_unique<CompletionRequest>(
       id, completion_location.textDocument.uri.GetAbsolutePath(),
-      completion_location.position, on_complete));
+      completion_location.position, on_complete), true /*priority*/);
 }
 
 void ClangCompleteManager::DiagnosticsUpdate(const std::string& path) {
@@ -741,7 +741,7 @@ void ClangCompleteManager::DiagnosticsUpdate(const std::string& path) {
           has = true;
       });
   if (!has) {
-    diagnostics_request_.PushBack(std::make_unique<DiagnosticRequest>(path),
+    diagnostics_request_.Enqueue(std::make_unique<DiagnosticRequest>(path),
                                   true /*priority*/);
   }
 }
@@ -755,7 +755,7 @@ void ClangCompleteManager::NotifyView(const AbsolutePath& filename) {
 
   // Only reparse the file if we create a new CompletionSession.
   if (EnsureCompletionOrCreatePreloadSession(filename))
-    preload_requests_.PushBack(PreloadRequest(filename), true /*priority*/);
+    preload_requests_.Enqueue(PreloadRequest(filename), true /*priority*/);
 }
 
 void ClangCompleteManager::NotifyEdit(const AbsolutePath& filename) {
@@ -774,7 +774,7 @@ void ClangCompleteManager::NotifySave(const AbsolutePath& filename) {
   //
 
   EnsureCompletionOrCreatePreloadSession(filename);
-  preload_requests_.PushBack(PreloadRequest(filename), true /*priority*/);
+  preload_requests_.Enqueue(PreloadRequest(filename), true /*priority*/);
 }
 
 void ClangCompleteManager::NotifyClose(const AbsolutePath& filename) {

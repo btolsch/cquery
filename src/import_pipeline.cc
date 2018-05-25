@@ -113,7 +113,7 @@ struct ActiveThread {
     out.params.doIdMapCount = queue->do_id_map.Size();
     out.params.loadPreviousIndexCount = queue->load_previous_index.Size();
     out.params.onIdMappedCount = queue->on_id_mapped.Size();
-    out.params.onIndexedCount = queue->on_indexed.Size();
+    out.params.onIndexedCount = queue->on_indexed_for_merge.Size() + queue->on_indexed_for_querydb.Size();
     out.params.activeThreads = status_->num_active_threads;
 
     // Ignore this progress update if the last update was too recent.
@@ -265,12 +265,9 @@ CacheLoadResult TryLoadFromCache(
   // No timestamps changed - load directly from cache.
   LOG_S(INFO) << "Skipping parse; no timestamp change for " << path_to_index;
 
-  // TODO/FIXME: real perf
-  PerformanceImportFile perf;
-
   std::vector<Index_DoIdMap> result;
   result.push_back(Index_DoIdMap(cache_manager->TakeOrLoad(path_to_index),
-                                 cache_manager, perf, is_interactive,
+                                 cache_manager, is_interactive,
                                  false /*write_to_disk*/));
   for (const AbsolutePath& dependency : previous_index->dependencies) {
     // Only load a dependency if it is not already loaded.
@@ -292,11 +289,10 @@ CacheLoadResult TryLoadFromCache(
       continue;
 
     result.push_back(Index_DoIdMap(std::move(dependency_index), cache_manager,
-                                   perf, is_interactive,
-                                   false /*write_to_disk*/));
+                                   is_interactive, false /*write_to_disk*/));
   }
 
-  QueueManager::instance()->do_id_map.EnqueueAll(std::move(result));
+  QueueManager::instance()->do_id_map.EnqueueAll(std::move(result), false /*priority*/);
   return CacheLoadResult::DoNotParse;
 }
 
@@ -383,9 +379,8 @@ void ParseFile(DiagnosticsEngine* diag_engine,
       request.cache_manager, entry, request.contents, path_to_index);
 
   std::vector<Index_DoIdMap> result;
-  PerformanceImportFile perf;
   auto indexes = indexer->Index(file_consumer_shared, path_to_index, entry.args,
-                                file_contents, &perf);
+                                file_contents);
 
   if (!indexes) {
     if (g_config->index.enabled && request.id.has_value()) {
@@ -412,8 +407,7 @@ void ParseFile(DiagnosticsEngine* diag_engine,
     // needed.
     LOG_S(INFO) << "Emitting index result for " << new_index->path;
     result.push_back(Index_DoIdMap(std::move(new_index), request.cache_manager,
-                                   perf, request.is_interactive,
-                                   true /*write_to_disk*/));
+                                   request.is_interactive, true /*write_to_disk*/));
   }
 
   QueueManager::instance()->do_id_map.EnqueueAll(std::move(result),
@@ -429,7 +423,7 @@ bool IndexMain_DoParse(
     ImportManager* import_manager,
     IIndexer* indexer) {
   auto* queue = QueueManager::instance();
-  optional<Index_Request> request = queue->index_request.TryPopFront();
+  optional<Index_Request> request = queue->index_request.TryDequeue(true /*priority*/);
   if (!request)
     return false;
 
@@ -448,13 +442,11 @@ bool IndexMain_DoCreateIndexUpdate(TimestampManager* timestamp_manager) {
   bool did_work = false;
   IterationLoop loop;
   while (loop.Next()) {
-    optional<Index_OnIdMapped> response = queue->on_id_mapped.TryPopFront();
+    optional<Index_OnIdMapped> response = queue->on_id_mapped.TryDequeue(true /*priority*/);
     if (!response)
       return did_work;
 
     did_work = true;
-
-    Timer time;
 
     IdMap* previous_id_map = nullptr;
     IndexFile* previous_index = nullptr;
@@ -467,7 +459,6 @@ bool IndexMain_DoCreateIndexUpdate(TimestampManager* timestamp_manager) {
     IndexUpdate update =
         IndexUpdate::CreateDelta(previous_id_map, response->current->ids.get(),
                                  previous_index, response->current->file.get());
-    response->perf.index_make_delta = time.ElapsedMicrosecondsAndReset();
     LOG_S(INFO) << "Built index update for " << response->current->file->path
                 << " (is_delta=" << !!response->previous << ")";
 
@@ -475,40 +466,16 @@ bool IndexMain_DoCreateIndexUpdate(TimestampManager* timestamp_manager) {
     if (response->write_to_disk) {
       LOG_S(INFO) << "Writing cached index to disk for "
                   << response->current->file->path;
-      time.Reset();
       response->cache_manager->WriteToCache(*response->current->file);
-      response->perf.index_save_to_disk = time.ElapsedMicrosecondsAndReset();
       timestamp_manager->UpdateCachedModificationTime(
           response->current->file->path,
           response->current->file->last_modification_time);
     }
 
-#if false
-#define PRINT_SECTION(name)                                                    \
-  if (response->perf.name) {                                                   \
-    total += response->perf.name;                                              \
-    output << " " << #name << ": " << FormatMicroseconds(response->perf.name); \
-  }
-    std::stringstream output;
-    long long total = 0;
-    output << "[perf]";
-    PRINT_SECTION(index_parse);
-    PRINT_SECTION(index_build);
-    PRINT_SECTION(index_save_to_disk);
-    PRINT_SECTION(index_load_cached);
-    PRINT_SECTION(querydb_id_map);
-    PRINT_SECTION(index_make_delta);
-    output << "\n       total: " << FormatMicroseconds(total);
-    output << " path: " << response->current_index->path;
-    LOG_S(INFO) << output.rdbuf();
-#undef PRINT_SECTION
-
-    if (response->is_interactive)
-      LOG_S(INFO) << "Applying IndexUpdate" << std::endl << update.ToString();
-#endif
-
-    Index_OnIndexed reply(std::move(update), response->perf);
-    queue->on_indexed.PushBack(std::move(reply), response->is_interactive);
+    Index_OnIndexed reply(std::move(update));
+    const int kMaxSizeForQuerydb = 5000;
+    ThreadedQueue<Index_OnIndexed>& q = queue->on_indexed_for_querydb.Size() < kMaxSizeForQuerydb ? queue->on_indexed_for_querydb : queue->on_indexed_for_merge;
+    q.Enqueue(std::move(reply), response->is_interactive /*priority*/);
   }
 
   return did_work;
@@ -516,7 +483,7 @@ bool IndexMain_DoCreateIndexUpdate(TimestampManager* timestamp_manager) {
 
 bool IndexMain_LoadPreviousIndex() {
   auto* queue = QueueManager::instance();
-  optional<Index_DoIdMap> response = queue->load_previous_index.TryPopFront();
+  optional<Index_DoIdMap> response = queue->load_previous_index.TryDequeue(true /*priority*/);
   if (!response)
     return false;
 
@@ -526,33 +493,30 @@ bool IndexMain_LoadPreviousIndex() {
       << "Unable to load previous index for already imported index "
       << response->current->path;
 
-  queue->do_id_map.PushBack(std::move(*response));
+  queue->do_id_map.Enqueue(std::move(*response), response->is_interactive /*priority*/);
   return true;
 }
 
 bool IndexMergeIndexUpdates() {
+  // Merge low-priority requests, since priority requests should get serviced
+  // by querydb asap.
+
   auto* queue = QueueManager::instance();
-  optional<Index_OnIndexed> root = queue->on_indexed.TryPopBack();
+  optional<Index_OnIndexed> root = queue->on_indexed_for_merge.TryDequeue(false /*priority*/);
   if (!root)
     return false;
 
   bool did_merge = false;
   IterationLoop loop;
   while (loop.Next()) {
-    optional<Index_OnIndexed> to_join = queue->on_indexed.TryPopBack();
+    optional<Index_OnIndexed> to_join = queue->on_indexed_for_merge.TryDequeue(false /*priority*/);
     if (!to_join)
       break;
     did_merge = true;
-    // Timer time;
     root->update.Merge(std::move(to_join->update));
-    // time.ResetAndPrint("Joined querydb updates for files: " +
-    // StringJoinMap(root->update.files_def_update,
-    //[](const QueryFile::DefUpdate& update) {
-    // return update.path;
-    //}));
   }
 
-  queue->on_indexed.PushFront(std::move(*root));
+  queue->on_indexed_for_querydb.Enqueue(std::move(*root), false /*priority*/);
   return did_merge;
 }
 
@@ -573,9 +537,8 @@ void IndexWithTuFromCodeCompletion(
     const std::vector<std::string>& args) {
   file_consumer_shared->Reset(path);
 
-  PerformanceImportFile perf;
   ClangIndex index;
-  auto indexes = ParseWithTu(file_consumer_shared, &perf, tu, &index, path,
+  auto indexes = ParseWithTu(file_consumer_shared, tu, &index, path,
                              args, file_contents);
   if (!indexes)
     return;
@@ -589,7 +552,7 @@ void IndexWithTuFromCodeCompletion(
     // When main thread does IdMap request it will request the previous index if
     // needed.
     LOG_S(INFO) << "Emitting index result for " << new_index->path;
-    result.push_back(Index_DoIdMap(std::move(new_index), cache_manager, perf,
+    result.push_back(Index_DoIdMap(std::move(new_index), cache_manager,
                                    true /*is_interactive*/,
                                    true /*write_to_disk*/));
   }
@@ -597,7 +560,7 @@ void IndexWithTuFromCodeCompletion(
   LOG_IF_S(WARNING, result.size() > 1)
       << "Code completion index update generated more than one index";
 
-  QueueManager::instance()->do_id_map.EnqueueAll(std::move(result));
+  QueueManager::instance()->do_id_map.EnqueueAll(std::move(result), true /*priority*/);
 }
 
 void Indexer_Main(DiagnosticsEngine* diag_engine,
@@ -606,8 +569,7 @@ void Indexer_Main(DiagnosticsEngine* diag_engine,
                   ImportManager* import_manager,
                   ImportPipelineStatus* status,
                   Project* project,
-                  WorkingFiles* working_files,
-                  MultiQueueWaiter* waiter) {
+                  WorkingFiles* working_files) {
   RealModificationTimestampFetcher modification_timestamp_fetcher;
   auto* queue = QueueManager::instance();
   // Build one index per-indexer, as building the index acquires a global lock.
@@ -646,8 +608,8 @@ void Indexer_Main(DiagnosticsEngine* diag_engine,
 
     // We didn't do any work, so wait for a notification.
     if (!did_work) {
-      waiter->Wait(&queue->on_indexed, &queue->index_request,
-                   &queue->on_id_mapped, &queue->load_previous_index);
+      QueueManager::instance()->indexer_waiter->Wait(&queue->index_request,
+                   &queue->on_id_mapped, &queue->load_previous_index, &queue->on_indexed_for_merge);
     }
   }
 }
@@ -663,11 +625,11 @@ void QueryDb_DoIdMap(QueueManager* queue,
   // it, load the previous state from disk and rerun IdMap logic later. Do not
   // do this if we have already attempted in the past.
   if (!request->load_previous && !request->previous &&
-      db->usr_to_file.find(NormalizedPath(request->current->path)) !=
+      db->usr_to_file.find(request->current->path) !=
           db->usr_to_file.end()) {
     assert(!request->load_previous);
     request->load_previous = true;
-    queue->load_previous_index.PushBack(std::move(*request));
+    queue->load_previous_index.Enqueue(std::move(*request), request->is_interactive /*priority*/);
     return;
   }
 
@@ -682,10 +644,8 @@ void QueryDb_DoIdMap(QueueManager* queue,
     return;
   }
 
-  Index_OnIdMapped response(request->cache_manager, request->perf,
+  Index_OnIdMapped response(request->cache_manager,
                             request->is_interactive, request->write_to_disk);
-  Timer time;
-
   auto make_map = [db](std::unique_ptr<IndexFile> file)
       -> std::unique_ptr<Index_OnIdMapped::File> {
     if (!file)
@@ -697,9 +657,8 @@ void QueryDb_DoIdMap(QueueManager* queue,
   };
   response.current = make_map(std::move(request->current));
   response.previous = make_map(std::move(request->previous));
-  response.perf.querydb_id_map = time.ElapsedMicrosecondsAndReset();
 
-  queue->on_id_mapped.PushBack(std::move(response));
+  queue->on_id_mapped.Enqueue(std::move(response), response.is_interactive /*priority*/);
 }
 
 void QueryDb_OnIndexed(QueueManager* queue,
@@ -730,7 +689,7 @@ void QueryDb_OnIndexed(QueueManager* queue,
 
       // Semantic highlighting.
       QueryFileId file_id =
-          db->usr_to_file[NormalizedPath(working_file->filename)];
+          db->usr_to_file[working_file->filename];
       QueryFile* file = &db->files[file_id.id];
       EmitSemanticHighlighting(db, semantic_cache, working_file, file);
     }
@@ -756,7 +715,7 @@ bool QueryDb_ImportMain(QueryDatabase* db,
 
   IterationLoop loop;
   while (loop.Next()) {
-    optional<Index_DoIdMap> request = queue->do_id_map.TryPopFront();
+    optional<Index_DoIdMap> request = queue->do_id_map.TryDequeue(true /*priority*/);
     if (!request)
       break;
     did_work = true;
@@ -765,7 +724,7 @@ bool QueryDb_ImportMain(QueryDatabase* db,
 
   loop.Reset();
   while (loop.Next()) {
-    optional<Index_OnIndexed> response = queue->on_indexed.TryPopFront();
+    optional<Index_OnIndexed> response = queue->on_indexed_for_querydb.TryDequeue(true /*priority*/);
     if (!response)
       break;
     did_work = true;
@@ -779,7 +738,7 @@ bool QueryDb_ImportMain(QueryDatabase* db,
 TEST_SUITE("ImportPipeline") {
   struct Fixture {
     Fixture() {
-      QueueManager::Init(&querydb_waiter, &indexer_waiter, &stdout_waiter);
+      QueueManager::Init();
 
       queue = QueueManager::instance();
       cache_manager = ICacheManager::MakeFake({});
@@ -798,13 +757,9 @@ TEST_SUITE("ImportPipeline") {
                      const std::vector<std::string>& args = {},
                      bool is_interactive = false,
                      const std::string& contents = "void foo();") {
-      queue->index_request.PushBack(
-          Index_Request(path, args, is_interactive, contents, cache_manager));
+      queue->index_request.Enqueue(
+          Index_Request(path, args, is_interactive, contents, cache_manager), false /*priority*/);
     }
-
-    MultiQueueWaiter querydb_waiter;
-    MultiQueueWaiter indexer_waiter;
-    MultiQueueWaiter stdout_waiter;
 
     QueueManager* queue = nullptr;
     DiagnosticsEngine diag_engine;

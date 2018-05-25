@@ -20,9 +20,7 @@ void TrimEndInPlace(std::string& s);
 void TrimInPlace(std::string& s);
 std::string Trim(std::string s);
 
-uint64_t HashUsr(const std::string& s);
-uint64_t HashUsr(const char* s);
-uint64_t HashUsr(const char* s, size_t n);
+uint64_t HashUsr(std::string_view s);
 
 // Returns true if |value| starts/ends with |start| or |ending|.
 bool StartsWith(std::string_view value, std::string_view start);
@@ -49,8 +47,6 @@ std::string ReplaceAll(const std::string& source,
 
 std::vector<std::string> SplitString(const std::string& str,
                                      const std::string& delimiter);
-
-std::string LowerPathIfCaseInsensitive(const std::string& path);
 
 template <typename TValues, typename TMap>
 std::string StringJoinMap(const TValues& values,
@@ -97,8 +93,8 @@ std::string EscapeFileName(std::string path);
 
 // FIXME: Move ReadContent into ICacheManager?
 bool FileExists(const std::string& filename);
-optional<std::string> ReadContent(const std::string& filename);
-std::vector<std::string> ReadLinesWithEnding(std::string filename);
+optional<std::string> ReadContent(const AbsolutePath& filename);
+std::vector<std::string> ReadLinesWithEnding(const AbsolutePath& filename);
 std::vector<std::string> ToLines(const std::string& content,
                                  bool trim_whitespace);
 
@@ -130,7 +126,7 @@ float GetProcessMemoryUsedInMb();
 
 std::string FormatMicroseconds(long long microseconds);
 
-std::string GetDefaultResourceDirectory();
+optional<AbsolutePath> GetDefaultResourceDirectory();
 
 // Makes sure all newlines in |output| are in \r\n format.
 std::string UpdateToRnNewlines(std::string output);

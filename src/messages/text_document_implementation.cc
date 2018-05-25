@@ -2,19 +2,23 @@
 #include "query_utils.h"
 #include "queue_manager.h"
 
-namespace {
-MethodType kMethodType = "$cquery/derived";
+#include <loguru.hpp>
 
-struct In_CqueryDerived : public RequestInMessage {
+namespace {
+MethodType kMethodType = "textDocument/implementation";
+
+struct In_TextDocumentImplementation : public RequestInMessage {
   MethodType GetMethodType() const override { return kMethodType; }
   lsTextDocumentPositionParams params;
 };
-MAKE_REFLECT_STRUCT(In_CqueryDerived, id, params);
-REGISTER_IN_MESSAGE(In_CqueryDerived);
+MAKE_REFLECT_STRUCT(In_TextDocumentImplementation, id, params);
+REGISTER_IN_MESSAGE(In_TextDocumentImplementation);
 
-struct Handler_CqueryDerived : BaseMessageHandler<In_CqueryDerived> {
+struct Handler_TextDocumentImplementation
+    : BaseMessageHandler<In_TextDocumentImplementation> {
   MethodType GetMethodType() const override { return kMethodType; }
-  void Run(In_CqueryDerived* request) override {
+
+  void Run(In_TextDocumentImplementation* request) override {
     QueryFile* file;
     if (!FindFileOrFail(db, project, request->id,
                         request->params.textDocument.uri.GetAbsolutePath(),
@@ -27,24 +31,27 @@ struct Handler_CqueryDerived : BaseMessageHandler<In_CqueryDerived> {
 
     Out_LocationList out;
     out.id = request->id;
+
+
     for (SymbolRef sym :
          FindSymbolsAtLocation(working_file, file, request->params.position)) {
       if (sym.kind == SymbolKind::Type) {
         QueryType& type = db->GetType(sym);
-        out.result = GetLsLocationExs(
-            db, working_files, GetDeclarations(db, type.derived),
-            g_config->xref.container, g_config->xref.maxNum);
+        out.result = GetLsLocations(
+            db, working_files, GetDeclarations(db, type.derived));
         break;
       } else if (sym.kind == SymbolKind::Func) {
         QueryFunc& func = db->GetFunc(sym);
-        out.result = GetLsLocationExs(
-            db, working_files, GetDeclarations(db, func.derived),
-            g_config->xref.container, g_config->xref.maxNum);
+        out.result = GetLsLocations(
+            db, working_files, GetDeclarations(db, func.derived));
         break;
       }
     }
+
+    if (out.result.size() >= g_config->xref.maxNum)
+      out.result.resize(g_config->xref.maxNum);
     QueueManager::WriteStdout(kMethodType, out);
   }
 };
-REGISTER_MESSAGE_HANDLER(Handler_CqueryDerived);
+REGISTER_MESSAGE_HANDLER(Handler_TextDocumentImplementation);
 }  // namespace

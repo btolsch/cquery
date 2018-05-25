@@ -1,8 +1,6 @@
 #pragma once
 
 #include "maybe.h"
-#include "nt_string.h"
-#include "port.h"
 
 #include <macro_map.h>
 #include <optional.h>
@@ -13,6 +11,8 @@
 #include <string>
 #include <type_traits>
 #include <vector>
+
+struct AbsolutePath;
 
 enum class SerializeFormat { Json, MessagePack };
 
@@ -85,12 +85,12 @@ struct optionals_mandatory_tag {};
 #define MAKE_REFLECT_TYPE_PROXY(type_name) \
   MAKE_REFLECT_TYPE_PROXY2(type_name, std::underlying_type<type_name>::type)
 #define MAKE_REFLECT_TYPE_PROXY2(type, as_type)                        \
-  ATTRIBUTE_UNUSED inline void Reflect(Reader& visitor, type& value) { \
+  inline void Reflect(Reader& visitor, type& value) {                  \
     as_type value0;                                                    \
     ::Reflect(visitor, value0);                                        \
     value = static_cast<type>(value0);                                 \
   }                                                                    \
-  ATTRIBUTE_UNUSED inline void Reflect(Writer& visitor, type& value) { \
+  inline void Reflect(Writer& visitor, type& value) {                  \
     auto value0 = static_cast<as_type>(value);                         \
     ::Reflect(visitor, value0);                                        \
   }
@@ -178,9 +178,6 @@ void Reflect(Writer& visitor, std::string& value);
 
 void Reflect(Reader& visitor, std::string_view& view);
 void Reflect(Writer& visitor, std::string_view& view);
-
-void Reflect(Reader& visitor, NtString& value);
-void Reflect(Writer& visitor, NtString& value);
 
 void Reflect(Reader& visitor, JsonNull& value);
 void Reflect(Writer& visitor, JsonNull& value);
@@ -312,7 +309,7 @@ void ReflectMember(Writer& visitor, const char* name, T& value) {
 std::string Serialize(SerializeFormat format, IndexFile& file);
 std::unique_ptr<IndexFile> Deserialize(
     SerializeFormat format,
-    const std::string& path,
+    const AbsolutePath& path,
     const std::string& serialized_index_content,
     const std::string& file_content,
     optional<int> expected_version);

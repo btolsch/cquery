@@ -17,13 +17,6 @@ struct In_TextDocumentDefinition : public RequestInMessage {
 MAKE_REFLECT_STRUCT(In_TextDocumentDefinition, id, params);
 REGISTER_IN_MESSAGE(In_TextDocumentDefinition);
 
-struct Out_TextDocumentDefinition
-    : public lsOutMessage<Out_TextDocumentDefinition> {
-  lsRequestId id;
-  std::vector<lsLocationEx> result;
-};
-MAKE_REFLECT_STRUCT(Out_TextDocumentDefinition, jsonrpc, id, result);
-
 std::vector<Use> GetNonDefDeclarationTargets(QueryDatabase* db, SymbolRef sym) {
   switch (sym.kind) {
     case SymbolKind::Var: {
@@ -32,7 +25,7 @@ std::vector<Use> GetNonDefDeclarationTargets(QueryDatabase* db, SymbolRef sym) {
       if (ret.empty()) {
         for (auto& def : db->GetVar(sym).def)
           if (def.type) {
-            if (Maybe<Use> use = GetDefinitionSpell(
+            if (optional<Use> use = GetDefinitionSpell(
                     db, SymbolIdx{*def.type, SymbolKind::Type})) {
               ret.push_back(*use);
               break;
@@ -61,7 +54,7 @@ struct Handler_TextDocumentDefinition
     WorkingFile* working_file =
         working_files->GetFileByFilename(file->def->path);
 
-    Out_TextDocumentDefinition out;
+    Out_LocationList out;
     out.id = request->id;
 
     Maybe<Use> on_def;
@@ -105,9 +98,7 @@ struct Handler_TextDocumentDefinition
         if (uses.empty() && on_def)
           uses.push_back(*on_def);
       }
-      AddRange(&out.result, GetLsLocationExs(db, working_files, uses,
-                                             g_config->xref.container,
-                                             g_config->xref.maxNum));
+      AddRange(&out.result, GetLsLocations(db, working_files, uses));
       if (!out.result.empty())
         break;
     }
@@ -116,7 +107,7 @@ struct Handler_TextDocumentDefinition
     if (out.result.empty()) {
       for (const IndexInclude& include : file->def->includes) {
         if (include.line == target_line) {
-          lsLocationEx result;
+          lsLocation result;
           result.uri = lsDocumentUri::FromPath(include.resolved_path);
           out.result.push_back(result);
           has_symbol = true;
@@ -150,9 +141,9 @@ struct Handler_TextDocumentDefinition
           auto pos = name.rfind(short_query);
           if (pos == std::string::npos)
             continue;
-          if (Maybe<Use> use = GetDefinitionSpell(db, db->symbols[i])) {
+          if (optional<Use> use = GetDefinitionSpell(db, db->symbols[i])) {
             std::tuple<int, int, bool, int> score{
-                int(name.size() - short_query.size()), -pos,
+                int(name.size() - short_query.size()), -int(pos),
                 use->file != file_id,
                 std::abs(use->range.start.line - position.line)};
             // Update the score with qualified name if the qualified name
@@ -160,7 +151,7 @@ struct Handler_TextDocumentDefinition
             pos = name.rfind(query);
             if (pos != std::string::npos) {
               std::get<0>(score) = int(name.size() - query.size());
-              std::get<1>(score) = -pos;
+              std::get<1>(score) = -int(pos);
             }
             if (score < best_score) {
               best_score = score;
@@ -169,10 +160,9 @@ struct Handler_TextDocumentDefinition
           }
         }
         if (best_i != -1) {
-          Maybe<Use> use = GetDefinitionSpell(db, db->symbols[best_i]);
+          optional<Use> use = GetDefinitionSpell(db, db->symbols[best_i]);
           assert(use);
-          if (auto ls_loc = GetLsLocationEx(db, working_files, *use,
-                                            g_config->xref.container))
+          if (auto ls_loc = GetLsLocation(db, working_files, *use))
             out.result.push_back(*ls_loc);
         }
       }

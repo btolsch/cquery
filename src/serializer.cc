@@ -132,16 +132,6 @@ void Reflect(Writer& visitor, std::string_view& data) {
     visitor.String(&data[0], (rapidjson::SizeType)data.size());
 }
 
-void Reflect(Reader& visitor, NtString& value) {
-  if (!visitor.IsString())
-    throw std::invalid_argument("std::string");
-  value = visitor.GetString();
-}
-void Reflect(Writer& visitor, NtString& value) {
-  const char* s = value.c_str();
-  visitor.String(s ? s : "");
-}
-
 void Reflect(Reader& visitor, JsonNull& value) {
   visitor.GetNull();
 }
@@ -357,7 +347,7 @@ std::string Serialize(SerializeFormat format, IndexFile& file) {
 
 std::unique_ptr<IndexFile> Deserialize(
     SerializeFormat format,
-    const std::string& path,
+    const AbsolutePath& path,
     const std::string& serialized_index_content,
     const std::string& file_content,
     optional<int> expected_version) {

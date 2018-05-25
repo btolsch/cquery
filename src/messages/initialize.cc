@@ -145,6 +145,8 @@ struct lsServerCapabilities {
   bool definitionProvider = true;
   // The server provides Goto Type Definition support.
   bool typeDefinitionProvider = true;
+  // The server provides implementation support.
+  bool implementationProvider = true;
   // The server provides find references support.
   bool referencesProvider = true;
   // The server provides document highlight support.
@@ -177,6 +179,7 @@ MAKE_REFLECT_STRUCT(lsServerCapabilities,
                     signatureHelpProvider,
                     definitionProvider,
                     typeDefinitionProvider,
+                    implementationProvider,
                     referencesProvider,
                     documentHighlightProvider,
                     documentSymbolProvider,
@@ -287,6 +290,9 @@ struct lsTextDocumentClientCapabilities {
   // Capabilities specific to the `textDocument/signatureHelp`
   optional<lsGenericDynamicReg> signatureHelp;
 
+  // Capabilities specific to the `textDocument/implementation`
+  optional<lsGenericDynamicReg> implementation;
+
   // Capabilities specific to the `textDocument/references`
   optional<lsGenericDynamicReg> references;
 
@@ -348,6 +354,7 @@ MAKE_REFLECT_STRUCT(lsTextDocumentClientCapabilities,
                     completion,
                     hover,
                     signatureHelp,
+                    implementation,
                     references,
                     documentHighlight,
                     documentSymbol,
@@ -536,37 +543,21 @@ struct Handler_Initialize : BaseMessageHandler<In_InitializeRequest> {
         }
       }
 
-      // Client capabilities
-      if (request->params.capabilities.textDocument) {
-        const auto& cap = *request->params.capabilities.textDocument;
-        if (cap.completion && cap.completion->completionItem)
-          g_config->client.snippetSupport =
-              cap.completion->completionItem->snippetSupport.value_or(false);
-      }
-
-      // Check client version.
-      if (g_config->clientVersion.has_value() &&
-          *g_config->clientVersion != kExpectedClientVersion) {
-        Out_ShowLogMessage out;
-        out.display_type = Out_ShowLogMessage::DisplayType::Show;
-        out.params.type = lsMessageType::Error;
-        out.params.message =
-            "cquery client (v" + std::to_string(*g_config->clientVersion) +
-            ") and server (v" + std::to_string(kExpectedClientVersion) +
-            ") version mismatch. Please update ";
-        if (g_config->clientVersion > kExpectedClientVersion)
-          out.params.message += "the cquery binary.";
-        else
-          out.params.message +=
-              "your extension client (VSIX file). Make sure to uninstall "
-              "the cquery extension and restart vscode before "
-              "reinstalling.";
-        out.Write(std::cout);
+      // Should snippets be enabled?
+      if (!request->params.capabilities.textDocument ||
+          !request->params.capabilities.textDocument->completion ||
+          !request->params.capabilities.textDocument->completion->completionItem ||
+          !request->params.capabilities.textDocument->completion->completionItem->snippetSupport) {
+        g_config->completion.enableSnippets = false;
       }
 
       // Ensure there is a resource directory.
-      if (g_config->resourceDirectory.empty())
-        g_config->resourceDirectory = GetDefaultResourceDirectory();
+      if (g_config->resourceDirectory.empty()) {
+        optional<AbsolutePath> resource_dir = GetDefaultResourceDirectory();
+        if (!resource_dir)
+          ABORT_S() << "Cannot resolve resource directory.";
+        g_config->resourceDirectory = resource_dir->path;
+      }
       LOG_S(INFO) << "Using -resource-dir=" << g_config->resourceDirectory;
 
       // Send initialization before starting indexers, so we don't send a
@@ -624,7 +615,7 @@ struct Handler_Initialize : BaseMessageHandler<In_InitializeRequest> {
         WorkThread::StartThread("indexer" + std::to_string(i), [=]() {
           Indexer_Main(diag_engine, file_consumer_shared, timestamp_manager,
                        import_manager, import_pipeline_status, project,
-                       working_files, waiter);
+                       working_files);
         });
       }
 

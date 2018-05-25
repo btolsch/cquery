@@ -1,6 +1,5 @@
 #pragma once
 
-#include "nt_string.h"
 #include "position.h"
 
 #include <clang-c/Index.h>
@@ -65,6 +64,7 @@ class ClangCursor {
   std::string get_display_name() const;
   std::string get_usr() const;
   Usr get_usr_hash() const;
+  optional<Usr> get_opt_usr_hash() const;
 
   bool is_definition() const;
 
@@ -85,7 +85,7 @@ class ClangCursor {
   bool is_valid_kind() const;
 
   std::string get_type_description() const;
-  NtString get_comments() const;
+  std::string get_comments() const;
 
   std::string ToString() const;
 

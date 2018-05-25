@@ -39,6 +39,7 @@ if(MSVC)
   target_compile_options(cquery PRIVATE
                          /nologo
                          /EHsc
+                         /D_CRT_SECURE_NO_WARNINGS # don't try to use MSVC std replacements
                          /W3 # roughly -Wall
                          /wd4996 # disable loguru unsafe warnings
                          /wd4722 # ignores warning C4722
@@ -256,6 +257,7 @@ target_sources(cquery PRIVATE
                src/clang_utils.cc
                src/code_complete_cache.cc
                src/command_line.cc
+               src/compiler.cc
                src/diagnostics_engine.cc
                src/file_consumer.cc
                src/file_contents.cc
@@ -275,7 +277,6 @@ target_sources(cquery PRIVATE
                src/platform_posix.cc
                src/platform_win.cc
                src/platform.cc
-               src/port.cc
                src/position.cc
                src/project.cc
                src/query_utils.cc
@@ -288,6 +289,7 @@ target_sources(cquery PRIVATE
                src/task.cc
                src/test.cc
                src/third_party_impl.cc
+               src/threaded_queue.cc
                src/timer.cc
                src/timestamp_manager.cc
                src/type_printer.cc
@@ -299,14 +301,12 @@ target_sources(cquery PRIVATE
                src/messages/cquery_base.cc
                src/messages/cquery_call_hierarchy.cc
                src/messages/cquery_callers.cc
-               src/messages/cquery_derived.cc
                src/messages/cquery_did_view.cc
                src/messages/cquery_file_info.cc
                src/messages/cquery_freshen_index.cc
                src/messages/cquery_index_file.cc
                src/messages/cquery_inheritance_hierarchy.cc
                src/messages/cquery_member_hierarchy.cc
-               src/messages/cquery_random.cc
                src/messages/cquery_vars.cc
                src/messages/cquery_wait.cc
                src/messages/exit.cc
@@ -325,6 +325,7 @@ target_sources(cquery PRIVATE
                src/messages/text_document_document_symbol.cc
                src/messages/text_document_formatting.cc
                src/messages/text_document_hover.cc
+               src/messages/text_document_implementation.cc
                src/messages/text_document_range_formatting.cc
                src/messages/text_document_references.cc
                src/messages/text_document_rename.cc

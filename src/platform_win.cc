@@ -56,7 +56,8 @@ AbsolutePath GetWorkingDirectory() {
 }
 
 optional<AbsolutePath> NormalizePath(const std::string& path0,
-                                     bool ensure_exists) {
+                                     bool ensure_exists,
+                                     bool force_lower_on_windows) {
   // Requires Windows 8
   /*
   if (!PathCanonicalize(buffer, path.c_str()))
@@ -99,8 +100,10 @@ optional<AbsolutePath> NormalizePath(const std::string& path0,
   path[0] = toupper(path[0]);
   */
   // Make the path all lower-case, since windows is case-insensitive.
-  for (size_t i = 0; i < path.size(); ++i)
-    path[i] = (char)tolower(path[i]);
+  if (force_lower_on_windows) {
+    for (size_t i = 0; i < path.size(); ++i)
+      path[i] = (char)tolower(path[i]);
+  }
 
   // cquery assumes forward-slashes.
   std::replace(path.begin(), path.end(), '\\', '/');
@@ -138,7 +141,7 @@ void SetCurrentThreadName(const std::string& thread_name) {
   __try {
     RaiseException(MS_VC_EXCEPTION, 0, sizeof(info) / sizeof(ULONG_PTR),
                    (ULONG_PTR*)&info);
-#ifdef _MSC_VER
+#if defined(_MSC_VER)
   } __except (EXCEPTION_EXECUTE_HANDLER) {
 #else
   } catch (...) {
@@ -319,7 +322,7 @@ optional<std::string> RunExecutable(const std::vector<std::string>& command,
       if (!success || bytes_read == 0)
         break;
 
-      for (int i = 0; i < bytes_read; ++i)
+      for (unsigned long i = 0; i < bytes_read; ++i)
         output += buffer[i];
     }
   };

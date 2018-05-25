@@ -38,13 +38,13 @@ std::vector<Use> GetDeclarations(std::vector<Q>& entities,
 
 }  // namespace
 
-Maybe<Use> GetDefinitionSpell(QueryDatabase* db, SymbolIdx sym) {
-  Maybe<Use> ret;
+optional<Use> GetDefinitionSpell(QueryDatabase* db, SymbolIdx sym) {
+  optional<Use> ret;
   EachEntityDef(db, sym, [&](const auto& def) { return !(ret = def.spell); });
   return ret;
 }
 
-Maybe<Use> GetDefinitionExtent(QueryDatabase* db, SymbolIdx sym) {
+optional<Use> GetDefinitionExtent(QueryDatabase* db, SymbolIdx sym) {
   // Used to jump to file.
   if (sym.kind == SymbolKind::File)
     return Use(Range(Position(0, 0), Position(0, 0)), sym.id, sym.kind,
@@ -54,7 +54,7 @@ Maybe<Use> GetDefinitionExtent(QueryDatabase* db, SymbolIdx sym) {
   return ret;
 }
 
-Maybe<QueryFileId> GetDeclarationFileForSymbol(QueryDatabase* db,
+optional<QueryFileId> GetDeclarationFileForSymbol(QueryDatabase* db,
                                                SymbolIdx sym) {
   switch (sym.kind) {
     case SymbolKind::File:
@@ -198,13 +198,13 @@ optional<lsRange> GetLsRange(WorkingFile* working_file, const Range& location) {
 
 lsDocumentUri GetLsDocumentUri(QueryDatabase* db,
                                QueryFileId file_id,
-                               std::string* path) {
+                               AbsolutePath* path) {
   QueryFile& file = db->files[file_id.id];
   if (file.def) {
     *path = file.def->path;
     return lsDocumentUri::FromPath(*path);
   } else {
-    *path = "";
+    path->path = "";
     return lsDocumentUri();
   }
 }
@@ -221,7 +221,7 @@ lsDocumentUri GetLsDocumentUri(QueryDatabase* db, QueryFileId file_id) {
 optional<lsLocation> GetLsLocation(QueryDatabase* db,
                                    WorkingFiles* working_files,
                                    Use use) {
-  std::string path;
+  AbsolutePath path;
   lsDocumentUri uri = GetLsDocumentUri(db, use.file, &path);
   optional<lsRange> range =
       GetLsRange(working_files->GetFileByFilename(path), use.range);
@@ -230,39 +230,20 @@ optional<lsLocation> GetLsLocation(QueryDatabase* db,
   return lsLocation(uri, *range);
 }
 
-optional<lsLocationEx> GetLsLocationEx(QueryDatabase* db,
+std::vector<lsLocation> GetLsLocations(QueryDatabase* db,
                                        WorkingFiles* working_files,
-                                       Use use,
-                                       bool container) {
-  optional<lsLocation> ls_loc = GetLsLocation(db, working_files, use);
-  if (!ls_loc)
-    return nullopt;
-  lsLocationEx ret;
-  ret.lsLocation::operator=(*ls_loc);
-  if (container) {
-    ret.role = uint16_t(use.role);
-    EachEntityDef(db, use, [&](const auto& def) {
-      ret.containerName = std::string_view(def.detailed_name);
-      return false;
-    });
+                                       const std::vector<Use>& uses) {
+  std::vector<lsLocation> result;
+  for (Use use : uses) {
+    if (optional<lsLocation> l = GetLsLocation(db, working_files, use))
+      result.push_back(*l);
   }
-  return ret;
-}
 
-std::vector<lsLocationEx> GetLsLocationExs(QueryDatabase* db,
-                                           WorkingFiles* working_files,
-                                           const std::vector<Use>& uses,
-                                           bool container,
-                                           int limit) {
-  std::vector<lsLocationEx> ret;
-  for (Use use : uses)
-    if (auto loc = GetLsLocationEx(db, working_files, use, container))
-      ret.push_back(*loc);
-  std::sort(ret.begin(), ret.end());
-  ret.erase(std::unique(ret.begin(), ret.end()), ret.end());
-  if (ret.size() > limit)
-    ret.resize(limit);
-  return ret;
+  std::sort(result.begin(), result.end());
+  result.erase(std::unique(result.begin(), result.end()), result.end());
+  if (result.size() > g_config->xref.maxNum)
+    result.resize(g_config->xref.maxNum);
+  return result;
 }
 
 lsSymbolKind GetSymbolKind(QueryDatabase* db, SymbolIdx sym) {

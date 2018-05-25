@@ -5,9 +5,9 @@
 
 #include <optional.h>
 
-Maybe<Use> GetDefinitionSpell(QueryDatabase* db, SymbolIdx sym);
-Maybe<Use> GetDefinitionExtent(QueryDatabase* db, SymbolIdx sym);
-Maybe<QueryFileId> GetDeclarationFileForSymbol(QueryDatabase* db,
+optional<Use> GetDefinitionSpell(QueryDatabase* db, SymbolIdx sym);
+optional<Use> GetDefinitionExtent(QueryDatabase* db, SymbolIdx sym);
+optional<QueryFileId> GetDeclarationFileForSymbol(QueryDatabase* db,
                                                SymbolIdx sym);
 
 // Get defining declaration (if exists) or an arbitrary declaration (otherwise)
@@ -29,21 +29,15 @@ optional<lsPosition> GetLsPosition(WorkingFile* working_file,
 optional<lsRange> GetLsRange(WorkingFile* working_file, const Range& location);
 lsDocumentUri GetLsDocumentUri(QueryDatabase* db,
                                QueryFileId file_id,
-                               std::string* path);
+                               AbsolutePath* path);
 lsDocumentUri GetLsDocumentUri(QueryDatabase* db, QueryFileId file_id);
 
 optional<lsLocation> GetLsLocation(QueryDatabase* db,
                                    WorkingFiles* working_files,
                                    Use use);
-optional<lsLocationEx> GetLsLocationEx(QueryDatabase* db,
+std::vector<lsLocation> GetLsLocations(QueryDatabase* db,
                                        WorkingFiles* working_files,
-                                       Use use,
-                                       bool container);
-std::vector<lsLocationEx> GetLsLocationExs(QueryDatabase* db,
-                                           WorkingFiles* working_files,
-                                           const std::vector<Use>& refs,
-                                           bool container,
-                                           int limit);
+                                       const std::vector<Use>& refs);
 // Returns a symbol. The symbol will have *NOT* have a location assigned.
 optional<lsSymbolInformation> GetSymbolInfo(QueryDatabase* db,
                                             WorkingFiles* working_files,
@@ -54,6 +48,7 @@ std::vector<SymbolRef> FindSymbolsAtLocation(WorkingFile* working_file,
                                              QueryFile* file,
                                              lsPosition position);
 
+// Calls fn with a QueryFunc, QueryType, or QueryVar instance.
 template <typename Fn>
 void WithEntity(QueryDatabase* db, SymbolIdx sym, Fn&& fn) {
   switch (sym.kind) {

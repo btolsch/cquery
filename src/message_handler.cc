@@ -61,7 +61,7 @@ bool FindFileOrFail(QueryDatabase* db,
                     QueryFileId* out_file_id) {
   *out_query_file = nullptr;
 
-  auto it = db->usr_to_file.find(NormalizedPath(absolute_path));
+  auto it = db->usr_to_file.find(absolute_path);
   if (it != db->usr_to_file.end()) {
     QueryFile& file = db->files[it->second.id];
     if (file.def) {
@@ -81,13 +81,6 @@ bool FindFileOrFail(QueryDatabase* db,
     LOG_S(INFO) << "\"" << absolute_path << "\" is being indexed.";
   else
     LOG_S(INFO) << "Unable to find file \"" << absolute_path << "\"";
-  /*
-  LOG_S(INFO) << "Files (size=" << db->usr_to_file.size() << "): "
-              << StringJoinMap(db->usr_to_file,
-                               [](const std::pair<NormalizedPath, QueryFileId>&
-  entry) { return entry.first.path;
-                               });
-  */
 
   if (id) {
     Out_Error out;
@@ -170,6 +163,9 @@ void EmitSemanticHighlighting(QueryDatabase* db,
             detailed_name.substr(0, detailed_name.find('<'));
         int16_t start_line = sym.range.start.line;
         int16_t start_col = sym.range.start.column;
+        // The function is not there if this isn't at least zero.
+        if (start_line < 0)
+          continue;
         if (start_line >= 0 && start_line < working_file->index_lines.size()) {
           std::string_view line = working_file->index_lines[start_line];
           sym.range.end.line = start_line;

@@ -162,6 +162,18 @@ Usr ClangCursor::get_usr_hash() const {
   return ret;
 }
 
+optional<Usr> ClangCursor::get_opt_usr_hash() const {
+  CXString usr = clang_getCursorUSR(cx_cursor);
+  const char* str = clang_getCString(usr);
+  if (!str || str[0] == '\0') {
+    clang_disposeString(usr);
+    return nullopt;
+  }
+  Usr ret = HashUsr(str);
+  clang_disposeString(usr);
+  return ret;
+}
+
 bool ClangCursor::is_definition() const {
   return clang_isCursorDefinition(cx_cursor);
 }
@@ -220,7 +232,7 @@ std::string ClangCursor::get_type_description() const {
   return ::ToString(clang_getTypeSpelling(type));
 }
 
-NtString ClangCursor::get_comments() const {
+std::string ClangCursor::get_comments() const {
   CXSourceRange range = clang_Cursor_getCommentRange(cx_cursor);
   if (clang_Range_isNull(range))
     return {};
@@ -278,7 +290,7 @@ NtString ClangCursor::get_comments() const {
     ret.pop_back();
   if (ret.empty())
     return {};
-  return static_cast<std::string_view>(ret);
+  return ret;
 }
 
 std::string ClangCursor::ToString() const {

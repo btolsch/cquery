@@ -553,15 +553,10 @@ optional<IndexTypeId> ResolveToDeclarationType(IndexFile* db,
 
   ClangCursor declaration =
       type.get_declaration().template_specialization_to_template_definition();
-  CXString cx_usr = clang_getCursorUSR(declaration.cx_cursor);
-  const char* str_usr = clang_getCString(cx_usr);
-  if (!str_usr || str_usr[0] == '\0') {
-    clang_disposeString(cx_usr);
+  optional<Usr> usr = declaration.get_opt_usr_hash();
+  if (!usr)
     return nullopt;
-  }
-  Usr usr = HashUsr(str_usr);
-  clang_disposeString(cx_usr);
-  IndexTypeId type_id = db->ToTypeId(usr);
+  IndexTypeId type_id = db->ToTypeId(*usr);
   IndexType* typ = db->Resolve(type_id);
   if (typ->def.detailed_name.empty()) {
     std::string name = declaration.get_spell_name();
@@ -973,15 +968,15 @@ void VisitDeclForTypeUsageVisitorHandler(ClangCursor cursor,
     }
   }
 
-  std::string referenced_usr =
+  optional<Usr> referenced_usr =
       cursor.get_referenced()
           .template_specialization_to_template_definition()
-          .get_usr();
-  // TODO: things in STL cause this to be empty. Figure out why and document it.
-  if (referenced_usr == "")
+          .get_opt_usr_hash();
+  // May be empty, happens in STL.
+  if (!referenced_usr)
     return;
 
-  IndexTypeId ref_type_id = db->ToTypeId(HashUsr(referenced_usr));
+  IndexTypeId ref_type_id = db->ToTypeId(*referenced_usr);
 
   if (!param->initial_type)
     param->initial_type = ref_type_id;
@@ -1206,14 +1201,14 @@ ClangCursor::VisitResult AddDeclInitializerUsagesVisitor(ClangCursor cursor,
       // cursor.get_referenced().template_specialization_to_template_definition().get_type().strip_qualifiers().get_usr_hash();
       // std::string ref_usr =
       // cursor.get_referenced().template_specialization_to_template_definition().get_type().strip_qualifiers().get_usr_hash();
-      auto ref_usr = cursor.get_referenced()
+      optional<Usr> ref_usr = cursor.get_referenced()
                          .template_specialization_to_template_definition()
-                         .get_usr();
+                         .get_usr_hash();
       // std::string ref_usr = ref.get_usr_hash();
-      if (ref_usr == "")
+      if (!ref_usr)
         break;
 
-      IndexVar* ref_var = db->Resolve(db->ToVarId(HashUsr(ref_usr)));
+      IndexVar* ref_var = db->Resolve(db->ToVarId(*ref_usr));
       AddUseSpell(db, ref_var->uses, cursor);
       break;
     }
@@ -2172,7 +2167,6 @@ optional<std::vector<std::unique_ptr<IndexFile>>> Parse(
     const std::string& file0,
     const std::vector<std::string>& args,
     const std::vector<FileContents>& file_contents,
-    PerformanceImportFile* perf,
     ClangIndex* index,
     bool dump_ast) {
   if (!g_config->index.enabled)
@@ -2184,8 +2178,6 @@ optional<std::vector<std::unique_ptr<IndexFile>>> Parse(
                    << " because it can not be found";
     return nullopt;
   }
-
-  Timer timer;
 
   std::vector<CXUnsavedFile> unsaved_files;
   for (const FileContents& contents : file_contents) {
@@ -2203,25 +2195,20 @@ optional<std::vector<std::unique_ptr<IndexFile>>> Parse(
   if (!tu)
     return nullopt;
 
-  perf->index_parse = timer.ElapsedMicrosecondsAndReset();
-
   if (dump_ast)
     Dump(clang_getTranslationUnitCursor(tu->cx_tu));
 
-  return ParseWithTu(file_consumer_shared, perf, tu.get(), index, *file, args,
+  return ParseWithTu(file_consumer_shared, tu.get(), index, *file, args,
                      unsaved_files);
 }
 
 optional<std::vector<std::unique_ptr<IndexFile>>> ParseWithTu(
     FileConsumerSharedState* file_consumer_shared,
-    PerformanceImportFile* perf,
     ClangTranslationUnit* tu,
     ClangIndex* index,
     const AbsolutePath& file,
     const std::vector<std::string>& args,
     const std::vector<CXUnsavedFile>& file_contents) {
-  Timer timer;
-
   IndexerCallbacks callback = {0};
   // Available callbacks:
   // - abortQuery
@@ -2264,8 +2251,6 @@ optional<std::vector<std::unique_ptr<IndexFile>>> ParseWithTu(
 
   ClangCursor(clang_getTranslationUnitCursor(tu->cx_tu))
       .VisitChildren(&VisitMacroDefinitionAndExpansions, &param);
-
-  perf->index_build = timer.ElapsedMicrosecondsAndReset();
 
   std::unordered_map<AbsolutePath, int> inc_to_line;
   // TODO
@@ -2364,7 +2349,10 @@ void ClangSanityCheck(const Project::Entry& entry) {
       unsigned int line, column;
       CXSourceLocation diag_loc = clang_getDiagnosticLocation(diagnostic);
       clang_getSpellingLocation(diag_loc, &file, &line, &column, nullptr);
-      LOG_S(WARNING) << FileName(file)->path << line << ":" << column << " "
+      std::string file_name;
+      if (FileName(file))
+        file_name = FileName(file)->path + ":";
+      LOG_S(WARNING) << file_name << line << ":" << column << " "
                      << ToString(clang_getDiagnosticSpelling(diagnostic));
       clang_disposeDiagnostic(diagnostic);
     }

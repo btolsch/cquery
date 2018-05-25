@@ -51,20 +51,8 @@ std::string Trim(std::string s) {
   TrimInPlace(s);
   return s;
 }
-void RemoveLastCR(std::string& s) {
-  if (!s.empty() && *s.rbegin() == '\r')
-    s.pop_back();
-}
 
-uint64_t HashUsr(const std::string& s) {
-  return HashUsr(s.c_str(), s.size());
-}
-
-uint64_t HashUsr(const char* s) {
-  return HashUsr(s, strlen(s));
-}
-
-uint64_t HashUsr(const char* s, size_t n) {
+uint64_t HashUsr(std::string_view s) {
   union {
     uint64_t ret;
     uint8_t out[8];
@@ -72,7 +60,7 @@ uint64_t HashUsr(const char* s, size_t n) {
   // k is an arbitrary key. Don't change it.
   const uint8_t k[16] = {0xd0, 0xe5, 0x4d, 0x61, 0x74, 0x63, 0x68, 0x52,
                          0x61, 0x79, 0xea, 0x70, 0xca, 0x70, 0xf0, 0x0d};
-  (void)siphash(reinterpret_cast<const uint8_t*>(s), n, k, out, 8);
+  (void)siphash(reinterpret_cast<const uint8_t*>(s.data()), s.length(), k, out, 8);
   return ret;
 }
 
@@ -182,17 +170,6 @@ std::vector<std::string> SplitString(const std::string& str,
   return strings;
 }
 
-std::string LowerPathIfCaseInsensitive(const std::string& path) {
-  std::string result = path;
-  /*
-#if defined(_WIN32)
-  for (size_t i = 0; i < result.size(); ++i)
-    result[i] = (char)tolower(result[i]);
-#endif
-  */
-  return result;
-}
-
 static void GetFilesInFolderHelper(
     std::string folder,
     bool recursive,
@@ -212,7 +189,7 @@ static void GetFilesInFolderHelper(
       if (tinydir_readfile(&dir, &file) == -1) {
         LOG_S(WARNING) << "Unable to read file " << file.name
                        << " when reading directory " << folder;
-        goto bail;
+        goto bailfile;
       }
 
       // Skip all dot files except .cquery.
@@ -226,14 +203,14 @@ static void GetFilesInFolderHelper(
         if (file.is_dir) {
           if (recursive) {
             std::string child_dir = q.front().second + file.name + "/";
-            if (!IsSymLink(AbsolutePath(file.path)))
+            if (!IsSymLink(AbsolutePath::BuildDoNotUse(file.path)))
               q.push(make_pair(file.path, child_dir));
           }
         } else {
           handler(q.front().second + file.name);
         }
       }
-
+    bailfile:
       if (tinydir_next(&dir) == -1) {
         LOG_S(WARNING) << "Unable to fetch next file when reading directory "
                        << folder;
@@ -315,10 +292,10 @@ bool FileExists(const std::string& filename) {
   return cache.is_open();
 }
 
-optional<std::string> ReadContent(const std::string& filename) {
+optional<std::string> ReadContent(const AbsolutePath& filename) {
   LOG_S(INFO) << "Reading " << filename;
   std::ifstream cache;
-  cache.open(filename);
+  cache.open(filename.path);
 
   try {
     return std::string(std::istreambuf_iterator<char>(cache),
@@ -328,10 +305,10 @@ optional<std::string> ReadContent(const std::string& filename) {
   }
 }
 
-std::vector<std::string> ReadLinesWithEnding(std::string filename) {
+std::vector<std::string> ReadLinesWithEnding(const AbsolutePath& filename) {
   std::vector<std::string> result;
 
-  std::ifstream input(filename);
+  std::ifstream input(filename.path);
   for (std::string line; SafeGetline(input, line);)
     result.push_back(line);
 
@@ -340,16 +317,22 @@ std::vector<std::string> ReadLinesWithEnding(std::string filename) {
 
 std::vector<std::string> ToLines(const std::string& content,
                                  bool trim_whitespace) {
+  auto remove_last_cr = [](std::string& s) {
+    if (!s.empty() && *s.rbegin() == '\r')
+      s.pop_back();
+  };
+
   std::vector<std::string> result;
 
   std::istringstream lines(content);
 
   std::string line;
   while (getline(lines, line)) {
-    if (trim_whitespace)
+    if (trim_whitespace) {
       TrimInPlace(line);
-    else
-      RemoveLastCR(line);
+    } else {
+      remove_last_cr(line);
+    }
     result.push_back(line);
   }
 
@@ -406,7 +389,7 @@ std::string FormatMicroseconds(long long microseconds) {
   return std::to_string(milliseconds) + "." + std::to_string(remaining) + "ms";
 }
 
-std::string GetDefaultResourceDirectory() {
+optional<AbsolutePath> GetDefaultResourceDirectory() {
   std::string result;
 
   std::string resource_directory =
@@ -419,7 +402,7 @@ std::string GetDefaultResourceDirectory() {
         resource_directory.substr(1, resource_directory.size() - 2);
   }
   if (resource_directory.compare(0, 2, "..") == 0) {
-    std::string executable_path = GetExecutablePath();
+    std::string executable_path = GetExecutablePath().path;
     size_t pos = executable_path.find_last_of('/');
     result = executable_path.substr(0, pos + 1);
     result += resource_directory;
@@ -427,12 +410,12 @@ std::string GetDefaultResourceDirectory() {
     result = resource_directory;
   }
 
-  auto normalized_result = NormalizePath(result);
+  auto normalized_result = NormalizePath(result, false /*ensure_exists*/);
   if (!normalized_result) {
     LOG_S(WARNING) << "Resource directory " << result << " does not exist";
-    return result;
+    return nullopt;
   }
-  return normalized_result->path;
+  return normalized_result;
 }
 
 std::string UpdateToRnNewlines(std::string output) {
@@ -458,9 +441,9 @@ std::string UpdateToRnNewlines(std::string output) {
 }
 
 AbsolutePath GetExecutablePathNextToCqueryBinary(const std::string& name) {
-  std::string executable_path = GetExecutablePath();
+  std::string executable_path = GetExecutablePath().path;
   size_t pos = executable_path.find_last_of('/');
-  return AbsolutePath(executable_path.substr(0, pos + 1) + name);
+  return AbsolutePath::BuildDoNotUse(executable_path.substr(0, pos + 1) + name);
 }
 
 bool IsAbsolutePath(const std::string& path) {

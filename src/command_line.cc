@@ -53,8 +53,6 @@
 std::string g_init_options;
 Config* g_config;
 
-extern char** environ;
-
 namespace {
 
 std::vector<std::string> kEmptyArgs;
@@ -110,12 +108,38 @@ See more on https://github.com/cquery-project/cquery/wiki
 }
 
 // Writes the environment to stdcerr.
-void PrintEnvironment() {
-  char** s = environ;
-  while (*s) {
-    std::cerr << *s << std::endl;
-    ++s;
+void PrintEnvironment(const char** env) {
+  while (*env) {
+    std::cerr << *env << std::endl;
+    ++env;
   }
+}
+
+struct Out_CqueryQueryDbStatus : public lsOutMessage<Out_CqueryQueryDbStatus> {
+  struct Params {
+    bool isActive = false;
+  };
+  std::string method = "$cquery/queryDbStatus";
+  Params params;
+};
+MAKE_REFLECT_STRUCT(Out_CqueryQueryDbStatus::Params,
+                    isActive);
+MAKE_REFLECT_STRUCT(Out_CqueryQueryDbStatus,
+                    jsonrpc,
+                    method,
+                    params);
+
+void WriteQueryDbStatus(bool is_active) {
+  if (!g_config->emitQueryDbBlocked)
+    return;
+
+  static bool last_status = false;
+  if (is_active == last_status)
+    return;
+  last_status = is_active;
+  Out_CqueryQueryDbStatus out;
+  out.params.isActive = is_active;
+  QueueManager::WriteStdout(out.method.c_str(), out);
 }
 
 }  // namespace
@@ -139,7 +163,6 @@ void PrintEnvironment() {
 ////////////////////////////////////////////////////////////////////////////////
 
 bool QueryDbMainLoop(QueryDatabase* db,
-                     MultiQueueWaiter* waiter,
                      Project* project,
                      FileConsumerSharedState* file_consumer_shared,
                      ImportManager* import_manager,
@@ -153,26 +176,28 @@ bool QueryDbMainLoop(QueryDatabase* db,
                      CodeCompleteCache* non_global_code_complete_cache,
                      CodeCompleteCache* signature_cache) {
   auto* queue = QueueManager::instance();
-  std::vector<std::unique_ptr<InMessage>> messages =
-      queue->for_querydb.DequeueAll();
-  bool did_work = messages.size();
-  for (auto& message : messages) {
-    // TODO: Consider using std::unordered_map to lookup the handler
+  bool did_work = false;
+
+  optional<std::unique_ptr<InMessage>> message = queue->for_querydb.TryDequeue(true /*priority*/);
+  while (message) {
+    did_work = true;
+
+    bool found_handler = false;
     for (MessageHandler* handler : *MessageHandler::message_handlers) {
-      if (handler->GetMethodType() == message->GetMethodType()) {
-        handler->Run(std::move(message));
+      if (handler->GetMethodType() == (*message)->GetMethodType()) {
+        handler->Run(std::move(*message));
+        found_handler = true;
         break;
       }
     }
 
-    if (message) {
-      LOG_S(FATAL) << "Exiting; no handler for " << message->GetMethodType();
+    if (!found_handler) {
+      LOG_S(FATAL) << "Exiting; no handler for " << (*message)->GetMethodType();
       exit(1);
     }
-  }
 
-  // TODO: consider rate-limiting and checking for IPC messages so we don't
-  // block requests / we can serve partial requests.
+    message = queue->for_querydb.TryDequeue(true /*priority*/);
+  }
 
   if (QueryDb_ImportMain(db, import_manager, status, semantic_cache,
                          working_files)) {
@@ -182,9 +207,7 @@ bool QueryDbMainLoop(QueryDatabase* db,
   return did_work;
 }
 
-void RunQueryDbThread(const std::string& bin_name,
-                      MultiQueueWaiter* querydb_waiter,
-                      MultiQueueWaiter* indexer_waiter) {
+void RunQueryDbThread(const std::string& bin_name) {
   Project project;
   SemanticHighlightSymbolCache semantic_cache;
   WorkingFiles working_files;
@@ -225,7 +248,6 @@ void RunQueryDbThread(const std::string& bin_name,
   // Setup shared references.
   for (MessageHandler* handler : *MessageHandler::message_handlers) {
     handler->db = &db;
-    handler->waiter = indexer_waiter;
     handler->project = &project;
     handler->diag_engine = &diag_engine;
     handler->file_consumer_shared = &file_consumer_shared;
@@ -245,8 +267,9 @@ void RunQueryDbThread(const std::string& bin_name,
   // Run query db main loop.
   SetCurrentThreadName("querydb");
   while (true) {
+    WriteQueryDbStatus(true);
     bool did_work = QueryDbMainLoop(
-        &db, querydb_waiter, &project, &file_consumer_shared, &import_manager,
+        &db, &project, &file_consumer_shared, &import_manager,
         &import_pipeline_status, &timestamp_manager, &semantic_cache,
         &working_files, &clang_complete, &include_complete,
         global_code_complete_cache.get(), non_global_code_complete_cache.get(),
@@ -256,9 +279,10 @@ void RunQueryDbThread(const std::string& bin_name,
     FreeUnusedMemory();
 
     if (!did_work) {
+      WriteQueryDbStatus(false);
       auto* queue = QueueManager::instance();
-      querydb_waiter->Wait(&queue->on_indexed, &queue->for_querydb,
-                           &queue->do_id_map);
+      QueueManager::instance()->querydb_waiter->Wait(&queue->for_querydb,
+                           &queue->do_id_map, &queue->on_indexed_for_querydb);
     }
   }
 }
@@ -319,7 +343,7 @@ void LaunchStdinLoop(std::unordered_map<MethodType, Timer>* request_times) {
       MethodType method_type = message->GetMethodType();
       (*request_times)[method_type] = Timer();
 
-      queue->for_querydb.PushBack(std::move(message));
+      queue->for_querydb.Enqueue(std::move(message), false /*priority*/);
 
       // If the message was to exit then querydb will take care of the actual
       // exit. Stop reading from stdin since it might be detached.
@@ -329,51 +353,41 @@ void LaunchStdinLoop(std::unordered_map<MethodType, Timer>* request_times) {
   });
 }
 
-void LaunchStdoutThread(std::unordered_map<MethodType, Timer>* request_times,
-                        MultiQueueWaiter* waiter) {
+void LaunchStdoutThread(std::unordered_map<MethodType, Timer>* request_times) {
   WorkThread::StartThread("stdout", [=]() {
     auto* queue = QueueManager::instance();
 
     while (true) {
-      std::vector<Stdout_Request> messages = queue->for_stdout.DequeueAll();
-      if (messages.empty()) {
-        waiter->Wait(&queue->for_stdout);
-        continue;
+      Stdout_Request message = queue->for_stdout.Dequeue();
+
+      if (ShouldDisplayMethodTiming(message.method)) {
+        Timer time = (*request_times)[message.method];
+        time.ResetAndPrint("[e2e] Running " + std::string(message.method));
       }
 
-      for (auto& message : messages) {
-        if (ShouldDisplayMethodTiming(message.method)) {
-          Timer time = (*request_times)[message.method];
-          time.ResetAndPrint("[e2e] Running " + std::string(message.method));
-        }
+      RecordOutput(message.content);
 
-        RecordOutput(message.content);
-
-        fwrite(message.content.c_str(), message.content.size(), 1, stdout);
-        fflush(stdout);
-      }
+      fwrite(message.content.c_str(), message.content.size(), 1, stdout);
+      fflush(stdout);
     }
   });
 }
 
-void LanguageServerMain(const std::string& bin_name,
-                        MultiQueueWaiter* querydb_waiter,
-                        MultiQueueWaiter* indexer_waiter,
-                        MultiQueueWaiter* stdout_waiter) {
+void LanguageServerMain(const std::string& bin_name) {
   std::unordered_map<MethodType, Timer> request_times;
 
   LaunchStdinLoop(&request_times);
 
   // We run a dedicated thread for writing to stdout because there can be an
   // unknown number of delays when output information.
-  LaunchStdoutThread(&request_times, stdout_waiter);
+  LaunchStdoutThread(&request_times);
 
   // Start querydb which takes over this thread. The querydb will launch
   // indexer threads as needed.
-  RunQueryDbThread(bin_name, querydb_waiter, indexer_waiter);
+  RunQueryDbThread(bin_name);
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv, const char** env) {
   // `clang-format` will not output anything if PATH is not set.
   if (!getenv("PATH")) {
     LOG_S(WARNING) << "The \"PATH\" environment variable is not set. "
@@ -413,8 +427,7 @@ int main(int argc, char** argv) {
   loguru::g_flush_interval_ms = 0;
   loguru::init(argc, argv);
 
-  MultiQueueWaiter querydb_waiter, indexer_waiter, stdout_waiter;
-  QueueManager::Init(&querydb_waiter, &indexer_waiter, &stdout_waiter);
+  QueueManager::Init();
 
   bool language_server = true;
 
@@ -422,13 +435,15 @@ int main(int argc, char** argv) {
   IndexInit();
 
   if (HasOption(options, "--print-env"))
-    PrintEnvironment();
+    PrintEnvironment(env);
 
   if (HasOption(options, "--record"))
     EnableRecording(options["--record"]);
 
   if (HasOption(options, "--check")) {
     loguru::g_stderr_verbosity = loguru::Verbosity_MAX;
+
+    LOG_S(INFO) << "Running --check";
 
     optional<AbsolutePath> path = NormalizePath(options["--check"]);
     if (!path) {
@@ -446,7 +461,9 @@ int main(int argc, char** argv) {
     language_server = false;
     Project project;
     Config config;
-    config.resourceDirectory = GetDefaultResourceDirectory();
+    if (!GetDefaultResourceDirectory())
+      ABORT_S() << "Cannot resolve resource directory";
+    config.resourceDirectory = GetDefaultResourceDirectory()->path;
     project.Load(GetWorkingDirectory().path);
     Project::Entry entry = project.FindCompilationEntryForFile(path->path);
     LOG_S(INFO) << "Using arguments " << StringJoin(entry.args, " ");
@@ -494,9 +511,7 @@ int main(int argc, char** argv) {
       }
     }
 
-    // std::cerr << "Running language server" << std::endl;
-    LanguageServerMain(argv[0], &querydb_waiter, &indexer_waiter,
-                       &stdout_waiter);
+    LanguageServerMain(argv[0]);
   }
 
   if (HasOption(options, "--wait-for-input")) {

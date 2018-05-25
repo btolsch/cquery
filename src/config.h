@@ -85,18 +85,12 @@ struct Config {
   // interval; it could take significantly longer if cquery is completely idle.
   int progressReportFrequencyMs = 500;
 
+  // If true, cquery will emit $cquery/queryDbStatus notifications whenever the
+  // querydb thread is busy or idle.
+  bool emitQueryDbBlocked = false;
+
   // If true, document links are reported for #include directives.
   bool showDocumentLinksOnIncludes = true;
-
-  // Version of the client. If undefined the version check is skipped. Used to
-  // inform users their vscode client is too old and needs to be updated.
-  optional<int> clientVersion;
-
-  struct ClientCapability {
-    // TextDocumentClientCapabilities.completion.completionItem.snippetSupport
-    bool snippetSupport = false;
-  };
-  ClientCapability client;
 
   struct CodeLens {
     // Enables code lens on parameter and function variables.
@@ -105,6 +99,10 @@ struct Config {
   CodeLens codeLens;
 
   struct Completion {
+    // If this is true and the client reports it can support snippets,
+    // completion will include snippets. Set to false to disable snippets.
+    bool enableSnippets = true;
+
     // Some completion UI, such as Emacs' completion-at-point and company-lsp,
     // display completion item label and detail side by side.
     // This does not look right, when you see things like:
@@ -172,6 +170,8 @@ struct Config {
 
     // If true, diagnostics from a full document parse will be reported.
     bool onParse = true;
+    // If true, diagnostics from typing will be reported.
+    bool onType = true;
   };
   Diagnostics diagnostics;
 
@@ -200,6 +200,7 @@ struct Config {
     //
     // Example: `ash/.*\.cc`
     std::vector<std::string> blacklist;
+    std::vector<std::string> whitelist;
 
     // 0: none, 1: Doxygen, 2: all comments
     // Plugin support for clients:
@@ -216,8 +217,6 @@ struct Config {
 
     // Number of indexer threads. If 0, 80% of cores are used.
     int threads = 0;
-
-    std::vector<std::string> whitelist;
   };
   Index index;
 
@@ -236,17 +235,16 @@ struct Config {
   bool enableIndexOnDidChange = false;
 
   struct Xref {
-    // If true, |Location[]| response will include lexical container.
-    bool container = false;
     // Maximum number of definition/reference/... results.
-    int maxNum = 2000;
+    unsigned int maxNum = 2000;
   };
   Xref xref;
 };
-MAKE_REFLECT_STRUCT(Config::ClientCapability, snippetSupport);
 MAKE_REFLECT_STRUCT(Config::CodeLens, localVariables);
 MAKE_REFLECT_STRUCT(Config::Completion,
+                    enableSnippets,
                     detailedLabel,
+                    dropOldRequests,
                     filterAndSort,
                     includeMaxPathSize,
                     includeSuffixWhitelist,
@@ -256,7 +254,8 @@ MAKE_REFLECT_STRUCT(Config::Diagnostics,
                     blacklist,
                     whitelist,
                     frequencyMs,
-                    onParse)
+                    onParse,
+                    onType)
 MAKE_REFLECT_STRUCT(Config::Highlight, blacklist, whitelist)
 MAKE_REFLECT_STRUCT(Config::Index,
                     attributeMakeCallsToCtor,
@@ -267,7 +266,7 @@ MAKE_REFLECT_STRUCT(Config::Index,
                     logSkippedPaths,
                     threads);
 MAKE_REFLECT_STRUCT(Config::WorkspaceSymbol, maxNum, sort);
-MAKE_REFLECT_STRUCT(Config::Xref, container, maxNum);
+MAKE_REFLECT_STRUCT(Config::Xref, maxNum);
 MAKE_REFLECT_STRUCT(Config,
                     compilationDatabaseCommand,
                     compilationDatabaseDirectory,
@@ -279,12 +278,10 @@ MAKE_REFLECT_STRUCT(Config,
                     extraClangArguments,
 
                     progressReportFrequencyMs,
+                    emitQueryDbBlocked,
 
                     showDocumentLinksOnIncludes,
 
-                    clientVersion,
-
-                    client,
                     codeLens,
                     completion,
                     diagnostics,
@@ -294,8 +291,5 @@ MAKE_REFLECT_STRUCT(Config,
                     xref,
 
                     enableIndexOnDidChange);
-
-// Expected client version. We show an error if this doesn't match.
-constexpr const int kExpectedClientVersion = 3;
 
 extern Config* g_config;

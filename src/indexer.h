@@ -9,8 +9,6 @@
 #include "language.h"
 #include "lsp.h"
 #include "maybe.h"
-#include "nt_string.h"
-#include "performance.h"
 #include "position.h"
 #include "project.h"
 #include "serializer.h"
@@ -147,8 +145,8 @@ template <typename F>
 struct TypeDefDefinitionData {
   // General metadata.
   std::string detailed_name;
-  NtString hover;
-  NtString comments;
+  std::string hover;
+  std::string comments;
 
   // While a class/type can technically have a separate declaration/definition,
   // it doesn't really happen in practice. The declaration never contains
@@ -246,8 +244,8 @@ template <typename F>
 struct FuncDefDefinitionData {
   // General metadata.
   std::string detailed_name;
-  NtString hover;
-  NtString comments;
+  std::string hover;
+  std::string comments;
   Maybe<Use> spell;
   Maybe<Use> extent;
 
@@ -351,8 +349,8 @@ template <typename F>
 struct VarDefDefinitionData {
   // General metadata.
   std::string detailed_name;
-  NtString hover;
-  NtString comments;
+  std::string hover;
+  std::string comments;
   // TODO: definitions should be a list of ranges, since there can be more
   //       than one - when??
   Maybe<Use> spell;
@@ -525,12 +523,10 @@ optional<std::vector<std::unique_ptr<IndexFile>>> Parse(
     const std::string& file,
     const std::vector<std::string>& args,
     const std::vector<FileContents>& file_contents,
-    PerformanceImportFile* perf,
     ClangIndex* index,
     bool dump_ast = false);
 optional<std::vector<std::unique_ptr<IndexFile>>> ParseWithTu(
     FileConsumerSharedState* file_consumer_shared,
-    PerformanceImportFile* perf,
     ClangTranslationUnit* tu,
     ClangIndex* index,
     const AbsolutePath& file,
